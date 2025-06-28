@@ -51,66 +51,64 @@ class YOLODualDetector(Node):
 
             if cv_image is None or cv_image.size == 0:
                 self.get_logger().warn(f"{label}: Empty image.")
+                publisher.publish(String(data="None"))
                 return
 
             resized_image = cv2.resize(cv_image, (640, 640))
             results = self.model(resized_image, verbose=False, conf=0.5)[0]
             obb = results.obb
 
-            if obb is None or obb.xyxyxyxy is None or len(obb.xyxyxyxy) == 0:
-                self.get_logger().warn(f"{label}: No OBB detections.")
-                return
-
-            polygons = obb.xyxyxyxy.cpu().numpy()
-            confs = obb.conf.cpu().numpy() if obb.conf is not None else [0.0] * len(polygons)
             centroids = []
 
-            for i, pts_flat in enumerate(polygons):
-                pts = pts_flat.reshape((4, 2)).astype(np.int32)
-                M = cv2.moments(pts)
-                if M["m00"] != 0:
-                    cx = int(M["m10"] / M["m00"])
-                    cy = int(M["m01"] / M["m00"])
-                    # Normalize centroid
-                    norm_cx = cx / 640.0
-                    norm_cy = cy / 640.0
-                    centroids.append((norm_cx, norm_cy))
+            if obb is not None and obb.xyxyxyxy is not None and len(obb.xyxyxyxy) > 0:
+                polygons = obb.xyxyxyxy.cpu().numpy()
+                confs = obb.conf.cpu().numpy() if obb.conf is not None else [0.0] * len(polygons)
 
-                    mask = np.zeros(resized_image.shape[:2], dtype=np.uint8)
-                    cv2.fillPoly(mask, [pts], 255)
-                    roi = cv2.bitwise_and(resized_image, resized_image, mask=mask)
-                    hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+                for i, pts_flat in enumerate(polygons):
+                    pts = pts_flat.reshape((4, 2)).astype(np.int32)
+                    M = cv2.moments(pts)
+                    if M["m00"] != 0:
+                        cx = int(M["m10"] / M["m00"])
+                        cy = int(M["m01"] / M["m00"])
+                        norm_cx = cx / 640.0
+                        norm_cy = cy / 640.0
+                        centroids.append((norm_cx, norm_cy))
 
-                    # Define HSV ranges for red
-                    red1 = cv2.inRange(hsv_roi, (0, 70, 50), (10, 255, 255))
-                    red2 = cv2.inRange(hsv_roi, (160, 70, 50), (180, 255, 255))
-                    red_mask = red1 + red2
+                        mask = np.zeros(resized_image.shape[:2], dtype=np.uint8)
+                        cv2.fillPoly(mask, [pts], 255)
+                        roi = cv2.bitwise_and(resized_image, resized_image, mask=mask)
+                        hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
-                    # Define HSV range for green
-                    green_mask = cv2.inRange(hsv_roi, (35, 50, 50), (85, 255, 255))
+                        red1 = cv2.inRange(hsv_roi, (0, 70, 50), (10, 255, 255))
+                        red2 = cv2.inRange(hsv_roi, (160, 70, 50), (180, 255, 255))
+                        red_mask = red1 + red2
+                        green_mask = cv2.inRange(hsv_roi, (35, 50, 50), (85, 255, 255))
 
-                    red_score = cv2.countNonZero(red_mask)
-                    green_score = cv2.countNonZero(green_mask)
-                    class_color = "red" if red_score > green_score else "green"
+                        red_score = cv2.countNonZero(red_mask)
+                        green_score = cv2.countNonZero(green_mask)
+                        class_color = "red" if red_score > green_score else "green"
 
-                    cv2.polylines(resized_image, [pts], True, (0, 255, 0), 2)
-                    cv2.circle(resized_image, (cx, cy), 4, (0, 0, 255), -1)
-                    label_text = f"{class_color} {confs[i]:.2f}"
-                    cv2.putText(resized_image, label_text, (pts[0][0], pts[0][1] - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                else:
-                    self.get_logger().warn(f"{label}: Degenerate polygon skipped.")
+                        cv2.polylines(resized_image, [pts], True, (0, 255, 0), 2)
+                        cv2.circle(resized_image, (cx, cy), 4, (0, 0, 255), -1)
+                        label_text = f"{class_color} {confs[i]:.2f}"
+                        cv2.putText(resized_image, label_text, (pts[0][0], pts[0][1] - 10),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                    else:
+                        self.get_logger().warn(f"{label}: Degenerate polygon skipped.")
+            else:
+                self.get_logger().warn(f"{label}: No OBB detections.")
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S%f")[:-3]
             out_path = os.path.join(self.output_dirs[label], f"{label}_{timestamp}.jpg")
             cv2.imwrite(out_path, resized_image)
 
-            centroid_msg = f"{centroids}"
+            centroid_msg = str(centroids) if centroids else "None"
             publisher.publish(String(data=centroid_msg))
-            self.get_logger().info(centroid_msg)
+            self.get_logger().info(f"{label} published: {centroid_msg}")
 
         except Exception as e:
             self.get_logger().error(f"Error in {label}: {str(e)}")
+            publisher.publish(String(data="None"))
 
 def main(args=None):
     rclpy.init(args=args)
